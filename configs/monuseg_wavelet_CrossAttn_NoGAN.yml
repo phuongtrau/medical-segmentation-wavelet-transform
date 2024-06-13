@@ -11,10 +11,10 @@ optim:
     grad_clip: 1.0
 
 model:
-    name: "Monuseg_Unet_Wavelet_edgeloss"
+    name: "Monuseg_Unet_Wavelet_CrossAttn_NoGAN"
 
 wavelet_model:
-    name: "Monuseg_Unet_wavelet_edgeloss"
+    name: "Monuseg_Unet_wavelet_CrossAttn_NoGAN"
     nz: 100
     # in_channels: 6
     patch_size: 1
@@ -41,7 +41,7 @@ wavelet_model:
     use_clip: True
     ema: True
     ema_decay: 0.9999
-    cross_attn: False
+    cross_attn: True
 
 clip:
     image_resolution: 224

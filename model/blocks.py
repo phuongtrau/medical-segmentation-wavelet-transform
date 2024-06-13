@@ -435,7 +435,7 @@ class WaveletResnetBlock_Adagn(nn.Module):
             min(out_ch // 4, 32), out_ch, zemb_dim)
             self.Conv_in_cross_attn = conv3x3(out_ch, clip_dim)
 
-            self.Multi_head_cross_attn = MultiHead_CrossAttention(hidden_size=clip_dim, num_heads=16)
+            self.Multi_head_cross_attn = MultiHead_CrossAttention(hidden_size=clip_dim, num_heads=4)
             
             self.GroupNorm_cross_attn_1 = AdaptiveGroupNorm(
             min(clip_dim // 4, 32), clip_dim, zemb_dim)

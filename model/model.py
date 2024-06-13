@@ -308,6 +308,276 @@ class Wavelet_Segmentation(nn.Module): ### combine with implicit warping module 
 
         return h
 
+class Wavelet_Segmentation_Cross_Attn(nn.Module): ### combine with implicit warping module ### 
+    def __init__(self, config):
+        super(Wavelet_Segmentation_Cross_Attn, self).__init__()
+        self.config = config
+        self.act = act = nn.SiLU()
+        self.z_emb_dim = z_emb_dim = config.wavelet_model.z_emb_dim
+
+        self.patch_size = config.wavelet_model.patch_size
+        assert config.wavelet_model.current_resolution % self.patch_size == 0
+
+        self.nf = nf = config.wavelet_model.num_channels_dae
+        ch_mult = config.wavelet_model.ch_mult
+        self.num_res_blocks = num_res_blocks = config.wavelet_model.num_res_blocks
+        self.attn_resolutions = attn_resolutions = config.wavelet_model.attn_resolutions
+
+        dropout = config.wavelet_model.dropout
+        self.num_resolutions = num_resolutions = len(ch_mult)
+        
+        self.all_resolutions = all_resolutions = [
+            (config.wavelet_model.current_resolution // self.patch_size) // (2 ** i) for i in range(num_resolutions)]
+
+        self.use_clip = use_clip = config.wavelet_model.use_clip
+        self.use_cross_attn = config.wavelet_model.cross_attn
+        init_scale = 0.
+        self.skip_rescale = skip_rescale = config.wavelet_model.skip_rescale
+
+        ### start construct the main Unet ### 
+        mains = [] ### main Unet 
+        cross_attn = [] ### Cross attn between stage of Unet ##
+
+        ### this one replace the time embedding by clip emb of clothe - only for main Unet ### 
+        if use_clip: 
+            mains.append(nn.Linear(config.clip.clip_chn, nf * 4)) ### the clip emb dimension is 512 
+            mains[-1].weight.data = default_init()(mains[-1].weight.shape)
+            nn.init.zeros_(mains[-1].bias)
+            mains.append(nn.Linear(nf * 4, nf * 4))
+            mains[-1].weight.data = default_init()(mains[-1].weight.shape)
+            nn.init.zeros_(mains[-1].bias)
+        
+        AttnBlock = functools.partial(AttentionBlock)
+
+        Cross_AttnBlock = functools.partial(MultiHead_CrossAttention,
+                                      num_heads = 4,
+                                      attn_dropout = 0.2)
+
+        ResnetBlock = functools.partial(WaveletResnetBlock_Adagn,
+                                        act=act,
+                                        dropout=dropout,
+                                        init_scale=init_scale,
+                                        skip_rescale=skip_rescale,
+                                        clip_dim = nf*4,
+                                        zemb_dim=z_emb_dim)
+
+        WaveDownBlock = functools.partial(WaveletDownsample)
+
+        #### Downsampling block
+
+        channels = config.wavelet_model.num_channels * self.patch_size**2
+        
+        input_pyramid_ch = channels
+
+        mains.append(conv3x3(channels, nf))
+
+        hs_c = [nf]
+        hs_c2 = [nf]
+
+        in_ch = nf
+        for i_level in range(num_resolutions):
+            
+            for i_block in range(num_res_blocks):
+                out_ch = nf * ch_mult[i_level]
+
+                if all_resolutions[i_level] in attn_resolutions:
+                    mains.append(ResnetBlock(in_ch=in_ch, out_ch=out_ch, cross_attn=self.use_cross_attn))
+                    in_ch = out_ch
+                    mains.append(AttnBlock(in_channels=in_ch))
+
+                else:
+                    mains.append(ResnetBlock(in_ch=in_ch, out_ch=out_ch))
+                    in_ch = out_ch
+                hs_c.append(in_ch)
+            
+            if i_level != num_resolutions - 1:
+                
+                hs_c2.append(in_ch)
+                
+                mains.append(ResnetBlock(down=True, in_ch=in_ch))
+                
+                mains.append(WaveDownBlock(
+                    in_ch=input_pyramid_ch, out_ch=in_ch))
+
+                input_pyramid_ch = in_ch
+
+                hs_c.append(in_ch)
+
+        ##### middle #
+        in_ch = hs_c[-1]
+
+        mains.append(ResnetBlock(in_ch=in_ch, cross_attn=self.use_cross_attn))
+        mains.append(AttnBlock(in_channels=in_ch))
+        mains.append(ResnetBlock(in_ch=in_ch, cross_attn= self.use_cross_attn))
+
+        #### Upsampling block 
+        for i_level in reversed(range(num_resolutions)):
+            for i_block in range(num_res_blocks + 1):
+                out_ch = nf * ch_mult[i_level]
+                
+                if all_resolutions[i_level] in attn_resolutions:
+                    mains.append(ResnetBlock(in_ch= in_ch + hs_c.pop()*0,
+                                           out_ch=out_ch, cross_attn= self.use_cross_attn))
+                    in_ch = out_ch
+                    mains.append(AttnBlock(in_channels=in_ch))
+                                        ### Cross attn after the Self attn ###
+                    cross_attn.append(Cross_AttnBlock(hidden_size = int(all_resolutions[i_level] * all_resolutions[i_level])))
+                else:
+                    mains.append(ResnetBlock(in_ch=in_ch + hs_c.pop(),
+                                           out_ch=out_ch, cross_attn= self.use_cross_attn))
+                    in_ch = out_ch
+            
+            if i_level != 0:
+                
+                mains.append(ResnetBlock(
+                    in_ch=in_ch, up=True, hi_in_ch=hs_c2.pop()))
+
+        channels_out = config.wavelet_model.num_out_channels
+        mains.append(nn.GroupNorm(num_groups=min(in_ch // 4, 32),
+                                    num_channels=in_ch, eps=1e-6))
+        mains.append(conv3x3(in_ch, channels_out, init_scale=init_scale))
+
+        self.mains_modules = nn.ModuleList(mains)
+        self.cross_attn = nn.ModuleList(cross_attn)
+
+        mapping_layers = [PixelNorm(),
+                          dense(config.wavelet_model.nz, z_emb_dim),
+                          self.act, ]
+        
+        for _ in range(config.wavelet_model.n_mlp):
+            mapping_layers.append(dense(z_emb_dim, z_emb_dim))
+            mapping_layers.append(self.act)
+
+        self.z_transform = nn.Sequential(*mapping_layers)
+
+        self.dwt = DWT_2D("haar")
+        self.iwt = IDWT_2D("haar")
+
+    def forward(self, x, z, clip_feature):
+
+        # patchify
+        x = rearrange(x, "n c (h p1) (w p2) -> n (p1 p2 c) h w",
+                      p1=self.patch_size, p2=self.patch_size)
+        
+        zemb = self.z_transform(z)
+
+        mains = self.mains_modules ### main Unet ###
+        mtl_cross_attn = self.cross_attn
+
+        m_idx = 0
+        attn_idx = 0
+
+        if self.use_clip :
+            clip_emb = mains[m_idx](clip_feature.type(torch.cuda.FloatTensor))
+            m_idx += 1
+            clip_emb = mains[m_idx](self.act(clip_emb))
+            m_idx += 1
+        else:
+            clip_emb = None
+
+        if not self.config.wavelet_model.centered:
+            # If input data is in [0, 1]
+            x = 2 * x - 1.
+
+        # Downsampling block
+        input_pyramid = x
+        
+        hs = [mains[m_idx](x)]
+        skipHs = []
+        m_idx += 1
+
+        for i_level in range(self.num_resolutions):
+            # Residual blocks for this resolution
+            for i_block in range(self.num_res_blocks):
+                h = mains[m_idx](x = hs[-1], clip_embeddings = clip_emb, zemb = zemb)
+                m_idx += 1
+
+                if h.shape[-2] in self.attn_resolutions:
+                    h = mains[m_idx](h)
+                    m_idx += 1
+
+                hs.append(h)
+            
+            if i_level != self.num_resolutions - 1:
+
+                h, skipH = mains[m_idx](x = h, clip_embeddings = clip_emb, zemb = zemb)
+                skipHs.append(skipH)
+
+                m_idx += 1
+
+                input_pyramid = mains[m_idx](input_pyramid)
+                m_idx += 1
+
+                if self.skip_rescale:
+                        input_pyramid = (input_pyramid + h) / np.sqrt(2.)
+
+                else:
+                    input_pyramid = input_pyramid + h
+
+                h = input_pyramid
+                hs.append(h)
+
+        h = hs[-1]
+
+        #### middle ### First Freq Bottelneck Block ###
+        h, hlh, hhl, hhh = self.dwt(h)
+        h = mains[m_idx](x = h / 2., clip_embeddings = clip_emb, zemb = zemb)
+        h = self.iwt(h * 2., hlh, hhl, hhh)
+
+        m_idx += 1
+
+        # attn block
+        h = mains[m_idx](h)
+        m_idx += 1
+
+        #### middle ### Second Freq Bottelneck Block ###
+        h, hlh, hhl, hhh = self.dwt(h)
+        h = mains[m_idx](x = h/2., clip_embeddings = clip_emb, zemb = zemb)
+        h = self.iwt(h * 2., hlh, hhl, hhh)
+
+        m_idx += 1
+
+        for i_level in reversed(range(self.num_resolutions)):
+            for i_block in range(self.num_res_blocks + 1):
+            
+                if h.shape[-2] in self.attn_resolutions:
+                    h_size = h.size()
+                    h_flt = torch.flatten(h,2)
+                    # print("h:",h_flt.shape)
+                    h_br_flt = torch.flatten(hs.pop(),2)
+                    # print("h_br:",h_br_flt.shape)
+                    h_cross_attn = mtl_cross_attn[attn_idx](query = h_flt, key = h_br_flt, value = h_br_flt)
+                    attn_idx +=1
+                    h = h_cross_attn.contiguous().view(h_size)
+                    h = mains[m_idx](x = h, clip_embeddings = clip_emb, zemb = zemb)
+                
+                    m_idx += 1
+
+                    h = mains[m_idx](h)
+                    m_idx += 1
+                
+                else:
+                    h = mains[m_idx](x = torch.cat([h, hs.pop()], dim=1), clip_embeddings = clip_emb, zemb = zemb)
+                    m_idx += 1
+
+            if i_level != 0:
+                h = mains[m_idx](x = h, clip_embeddings = clip_emb, zemb = zemb, skipH=skipHs.pop())
+                m_idx += 1
+
+        assert not hs
+
+        h = self.act(mains[m_idx](h))
+        m_idx += 1
+        h = mains[m_idx](h)
+        m_idx += 1
+        assert m_idx == len(mains)
+
+        # unpatchify
+        h = rearrange(h, "n (c p1 p2) h w -> n c (h p1) (w p2)",
+                      p1=self.patch_size, p2=self.patch_size)
+
+        return h
+
 class Wavelet_Segmentation_GN(nn.Module): ### combine with implicit warping module ### 
     def __init__(self, config):
         super(Wavelet_Segmentation_GN, self).__init__()

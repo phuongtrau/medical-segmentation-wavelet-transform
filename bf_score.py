@@ -165,33 +165,35 @@ def bfscore(gtfile, prfile, threshold=2):
 
 
 if __name__ == "__main__":
+    import os 
+    root_folder = '/mnt/hdd_1A/ds_project/result/Monuseg_Unet_Wavelet_NoCLIP/test'
+    images_pred = [os.path.join(root_folder, e) for e in os.listdir(root_folder) if 'pred' in e] 
+    score_total = 0
+    area_total = 0
+    fw_bfscore = []
+    
+    for image_pred in images_pred:
 
-    sample_gt = 'data/gt_1.png'
-    # sample_gt = 'data/gt_0.png'
-
-    sample_pred = 'data/crf_1.png'
-    # sample_pred = 'data/pred_0.png'
-
-    score, areas_gt = bfscore(sample_gt, sample_pred, 2)    # Same classes
-    # score, areas_gt = bfscore(sample_gt, sample_pred, 2)    # Different classes
-
+        score, areas_gt = bfscore(image_pred.replace('pred','gt'), image_pred, 2)    # Same classes
+        score_total += np.nanmean(score)
+        area_total += np.nansum(areas_gt)
+        
+        for each in zip(score, areas_gt):
+            if math.isnan(each[0]) or math.isnan(each[1]):
+                fw_bfscore.append(math.nan)
+            else:
+                fw_bfscore.append(each[0] * each[1])
     # gt_shape = cv2.imread('data/gt_1.png').shape
     # print("Total area:", gt_shape[0] * gt_shape[1])
 
-    total_area = np.nansum(areas_gt)
-    print("GT area (except background):", total_area)
-    fw_bfscore = []
-    for each in zip(score, areas_gt):
-        if math.isnan(each[0]) or math.isnan(each[1]):
-            fw_bfscore.append(math.nan)
-        else:
-            fw_bfscore.append(each[0] * each[1])
-    print(fw_bfscore)
+    # total_area = np.nansum(areas_gt)
+    print("GT area (except background):", area_total)
+    
 
     print("\n>>>>BFscore:\n")
-    print("BFSCORE:", score)
-    print("Per image BFscore:", np.nanmean(score))
+    print("BFSCORE:", score_total)
+    print("Per image BFscore:", score_total/224)
 
     print("\n>>>>Weighted BFscore:\n")
-    print("Weighted-BFSCORE:", fw_bfscore)
-    print("Per image Weighted-BFscore:", np.nansum(fw_bfscore)/total_area)
+    # print("Weighted-BFSCORE:", fw_bfscore)
+    print("Per image Weighted-BFscore:", np.nansum(fw_bfscore)/area_total)

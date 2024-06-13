@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
 from data import MonusegData
-from model.model import UNet, SpectralDiscriminator, Wavelet_Segmentation, Wavelet_Segmentation_GN
+from model.model import UNet, SpectralDiscriminator, Wavelet_Segmentation, Wavelet_Segmentation_GN, Wavelet_Segmentation_Cross_Attn
 from model.losses import VGGLoss, DiceBCELoss, DiceLoss, edge_aware_loss
 
 from tqdm import tqdm
@@ -143,9 +143,8 @@ def main():
                           num_workers=4, pin_memory=False, drop_last=True)
     
     start_epoch = 0
-    # net_G = UNet(n_channels=3, n_classes=1).to(device)
     net_G = Wavelet_Segmentation(config).to(device)
-
+    # net_G = Wavelet_Segmentation_Cross_Attn(config).to(device)
     net_D = SpectralDiscriminator(input_nc=1).to(device)
 
     optim_G = get_optimizer(config, 
@@ -157,17 +156,16 @@ def main():
     
     # schedu_G = lr_scheduler.CosineAnnealingLR(
     #             optim_G, args.num_epoch, eta_min=1e-5)
-    
-    # schedu_D = lr_scheduler.CosineAnnealingLR(
-    #         optim_D, args.num_epoch, eta_min=1e-5)
 
     schedu_G = lr_scheduler.MultiStepLR(optim_G, milestones=[1000], gamma=0.5)
     
     schedu_D = lr_scheduler.MultiStepLR(optim_D, milestones=[1000], gamma=0.5)
     
-    ### CLIP Condition model ### 
-    clip_model, _ = clip.load(name = config.clip.clip_model, device=device, jit=False)
-    clip_model.eval()
+    if config.wavelet_model.use_clip:
+        ### CLIP Condition model ### 
+        clip_model, _ = clip.load(name = config.clip.clip_model, device=device, jit=False)
+        clip_model.eval()
+    
 
     ### logging experiment ###
     ### experiment name ###
@@ -235,10 +233,11 @@ def main():
             assert 0 < input_data.max() <= 1
 
             latent_z = torch.randn(args.batch_size, config.wavelet_model.nz, device=device)
-            # text = clip.tokenize(prompt).to(device)
-            # text_emb =  clip_model.encode_text(text).unsqueeze(1).float()
 
-            clip_feature = clip_model.encode_image(input_clip) #+ clip_model.encode_text(text)
+            if config.wavelet_model.use_clip:
+                clip_feature = clip_model.encode_image(input_clip) #+ clip_model.encode_text(text)
+            else:
+                clip_feature = None
 
             predict = net_G(x = input_data, z = latent_z, clip_feature = clip_feature)   
 
@@ -251,16 +250,16 @@ def main():
 
             predicts = torch.cat([predict_sample]*3, 1)
             targets = torch.cat([target]*3, 1)
-            
+            net_G.zero_grad()
             ### loss function ### 
             loss_l1 = criterionL1(predict_sample, target)
             loss_vgg = criterionVGG(predicts, targets)
             loss_dice = criterionDice(predict_sample, target)
             # loss_bce = criterionBCE(predict_sample, target)
             # loss_ce = criterionCE(predict_sample, target)
-            # loss_edge = edge_aware_loss(target, predict_sample) 
+            loss_edge = edge_aware_loss(target, predict_sample) 
 
-            loss_all =  loss_dice + loss_l1 + loss_vgg #+ loss_bce
+            loss_all =  loss_dice + loss_l1 + loss_vgg + loss_edge
             
             ### loss Adversarial ### 
 
@@ -272,13 +271,13 @@ def main():
 
             net_D.zero_grad()
             
-            D_in_fake = diffaug(predict_sample.detach()).cuda()
+            D_in_fake = predict_sample.detach().cuda()
             
             noise = torch.randn_like(D_in_fake).cuda() * random.uniform(-0.05 , 0.05)
 
             D_in_fake = D_in_fake + noise
 
-            D_in_real =  diffaug(target).cuda() + noise
+            D_in_real = target + noise
             
             ### Relativistic average LSGAN ###
             loss_gan_D = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake)) - torch.ones_like(net_D(D_in_real))) ** 2) \
@@ -295,7 +294,7 @@ def main():
                 p.requires_grad = True
             optim_G.zero_grad()
 
-            D_in_fake_G =  diffaug(predict_sample).cuda() + noise
+            D_in_fake_G = predict_sample.cuda() + noise
 
             ### Relativistic average LSGAN ###
             loss_gan_G = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake_G)) + torch.ones_like(net_D(D_in_real))) ** 2) \
@@ -303,7 +302,7 @@ def main():
 
 
             loss_all = loss_all + loss_gan_G
-            
+
             loss_all.backward()
             optim_G.step()
             schedu_G.step()
@@ -311,14 +310,13 @@ def main():
             if (step+1) % args.display_count == 0:
                 
                 board.add_scalar('lr_G', schedu_G.get_last_lr(), step+1)
-                board.add_scalar('lr_D', schedu_D.get_last_lr(), step+1)
 
                 board.add_scalar('loss_all', loss_all.item(), step+1)
                 board.add_scalar('loss_l1', loss_l1.item(), step+1)
                 board.add_scalar('loss_vgg', loss_vgg.item(), step+1)
                 board.add_scalar('loss_dice', loss_dice.item(), step+1)
                 # board.add_scalar('loss_bce', loss_bce.item(), step+1)
-                # board.add_scalar('loss_edge', loss_edge.item(), step+1)
+                board.add_scalar('loss_edge', loss_edge.item(), step+1)
 
                 board.add_scalar('loss_gan_D', loss_gan_D.item(), step+1)
                 board.add_scalar('loss_gan_G', loss_gan_G.item(), step+1)
@@ -358,7 +356,7 @@ def main():
 
             input_image = inputs['image'].cuda()
             target = inputs['target'].cuda()
-            prompt = inputs['prompt']
+            # prompt = inputs['prompt']
 
             input_clip = inputs['image_clip'].cuda()
 
@@ -375,8 +373,11 @@ def main():
             # text = clip.tokenize(prompt).to(device)
 
             latent_z = torch.randn(1, config.wavelet_model.nz, device=device)
-            clip_feature = clip_model.encode_image(input_clip) #+ clip_model.encode_text(text)
-
+            if config.wavelet_model.use_clip:
+                clip_feature = clip_model.encode_image(input_clip) #+ clip_model.encode_text(text)
+            else:
+                clip_feature = None
+                
             predict = net_G(x = input_data, z = latent_z, clip_feature = clip_feature)   
 
             predict = predict * 2
