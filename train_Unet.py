@@ -135,23 +135,18 @@ def main():
     net_G = UNet(n_channels=3, n_classes=1).to(device)
     # net_G = Wavelet_Segmentation(config).to(device)
 
-    net_D = SpectralDiscriminator(input_nc=1).to(device)
+    # net_D = SpectralDiscriminator(input_nc=1).to(device)
 
     optim_G = get_optimizer(config, 
                             filter(lambda p: p.requires_grad, net_G.parameters()), 
                             args.lr_g)
-    optim_D = get_optimizer(config, 
-                            filter(lambda p: p.requires_grad, net_D.parameters()), 
-                            args.lr_d)
+    # optim_D = get_optimizer(config, 
+    #                         filter(lambda p: p.requires_grad, net_D.parameters()), 
+    #                         args.lr_d)
     
-    # schedu_G = lr_scheduler.CosineAnnealingLR(
-    #             optim_G, args.num_epoch, eta_min=1e-5)
-    
-    # schedu_D = lr_scheduler.CosineAnnealingLR(
-    #         optim_D, args.num_epoch, eta_min=1e-5)
     schedu_G = lr_scheduler.MultiStepLR(optim_G, milestones=[1000], gamma=0.5)
     
-    schedu_D = lr_scheduler.MultiStepLR(optim_D, milestones=[1000], gamma=0.5)
+    # schedu_D = lr_scheduler.MultiStepLR(optim_D, milestones=[1000], gamma=0.5)
     
     ### logging experiment ###
     ### experiment name ###
@@ -174,10 +169,10 @@ def main():
         net_G.load_state_dict(checkpoint['netG_dict'])
         optim_G.load_state_dict(checkpoint['optimizerG'])
         schedu_G.load_state_dict(checkpoint['schedulerG'])
-        # load D
-        net_D.load_state_dict(checkpoint['netD_dict'])
-        optim_D.load_state_dict(checkpoint['optimizerD'])
-        schedu_D.load_state_dict(checkpoint['schedulerD'])
+        # # load D
+        # net_D.load_state_dict(checkpoint['netD_dict'])
+        # optim_D.load_state_dict(checkpoint['optimizerD'])
+        # schedu_D.load_state_dict(checkpoint['schedulerD'])
 
         step = checkpoint['step']
         print("=> loaded checkpoint (epoch {})"

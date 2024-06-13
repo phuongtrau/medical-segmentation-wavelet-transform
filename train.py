@@ -144,22 +144,17 @@ def main():
     
     start_epoch = 0
     net_G = Wavelet_Segmentation(config).to(device)
-    # net_G = Wavelet_Segmentation_Cross_Attn(config).to(device)
-    net_D = SpectralDiscriminator(input_nc=1).to(device)
-
     optim_G = get_optimizer(config, 
                             filter(lambda p: p.requires_grad, net_G.parameters()), 
                             args.lr_g)
-    optim_D = get_optimizer(config, 
+    schedu_G = lr_scheduler.MultiStepLR(optim_G, milestones=[1000], gamma=0.5)
+
+    if config.wavelet_model.use_gan:
+        net_D = SpectralDiscriminator(input_nc=1).to(device)
+        optim_D = get_optimizer(config, 
                             filter(lambda p: p.requires_grad, net_D.parameters()), 
                             args.lr_d)
-    
-    # schedu_G = lr_scheduler.CosineAnnealingLR(
-    #             optim_G, args.num_epoch, eta_min=1e-5)
-
-    schedu_G = lr_scheduler.MultiStepLR(optim_G, milestones=[1000], gamma=0.5)
-    
-    schedu_D = lr_scheduler.MultiStepLR(optim_D, milestones=[1000], gamma=0.5)
+        schedu_D = lr_scheduler.MultiStepLR(optim_D, milestones=[1000], gamma=0.5)
     
     if config.wavelet_model.use_clip:
         ### CLIP Condition model ### 
@@ -188,10 +183,11 @@ def main():
         net_G.load_state_dict(checkpoint['netG_dict'])
         optim_G.load_state_dict(checkpoint['optimizerG'])
         schedu_G.load_state_dict(checkpoint['schedulerG'])
-        # load D
-        net_D.load_state_dict(checkpoint['netD_dict'])
-        optim_D.load_state_dict(checkpoint['optimizerD'])
-        schedu_D.load_state_dict(checkpoint['schedulerD'])
+        if config.wavelet_model.use_gan:
+            # load D
+            net_D.load_state_dict(checkpoint['netD_dict'])
+            optim_D.load_state_dict(checkpoint['optimizerD'])
+            schedu_D.load_state_dict(checkpoint['schedulerD'])
 
         step = checkpoint['step']
         print("=> loaded checkpoint (epoch {})"
@@ -255,53 +251,52 @@ def main():
             loss_l1 = criterionL1(predict_sample, target)
             loss_vgg = criterionVGG(predicts, targets)
             loss_dice = criterionDice(predict_sample, target)
-            # loss_bce = criterionBCE(predict_sample, target)
-            # loss_ce = criterionCE(predict_sample, target)
             loss_edge = edge_aware_loss(target, predict_sample) 
 
             loss_all =  loss_dice + loss_l1 + loss_vgg + loss_edge
-            
-            ### loss Adversarial ### 
 
-            for p in net_D.parameters():
-                p.requires_grad = True
-            
-            for p in net_G.parameters():
-                p.requires_grad = False
+            if config.wavelet_model.use_gan:
+                ### loss Adversarial ### 
 
-            net_D.zero_grad()
-            
-            D_in_fake = predict_sample.detach().cuda()
-            
-            noise = torch.randn_like(D_in_fake).cuda() * random.uniform(-0.05 , 0.05)
+                for p in net_D.parameters():
+                    p.requires_grad = True
+                
+                for p in net_G.parameters():
+                    p.requires_grad = False
 
-            D_in_fake = D_in_fake + noise
+                net_D.zero_grad()
+                
+                D_in_fake = predict_sample.detach().cuda()
+                
+                noise = torch.randn_like(D_in_fake).cuda() * random.uniform(-0.05 , 0.05)
 
-            D_in_real = target + noise
-            
-            ### Relativistic average LSGAN ###
-            loss_gan_D = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake)) - torch.ones_like(net_D(D_in_real))) ** 2) \
-                    + torch.mean((net_D(D_in_fake) - torch.mean(net_D(D_in_real)) + torch.ones_like(net_D(D_in_real))) ** 2))/2 * 0.1
+                D_in_fake = D_in_fake + noise
 
-            loss_gan_D.backward()
-            optim_D.step()
-            schedu_D.step()
+                D_in_real = target + noise
+                
+                ### Relativistic average LSGAN ###
+                loss_gan_D = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake)) - torch.ones_like(net_D(D_in_real))) ** 2) \
+                        + torch.mean((net_D(D_in_fake) - torch.mean(net_D(D_in_real)) + torch.ones_like(net_D(D_in_real))) ** 2))/2 * 0.1
 
-            for p in net_D.parameters():
-                p.requires_grad = False
-            
-            for p in net_G.parameters():
-                p.requires_grad = True
-            optim_G.zero_grad()
+                loss_gan_D.backward()
+                optim_D.step()
+                schedu_D.step()
 
-            D_in_fake_G = predict_sample.cuda() + noise
+                for p in net_D.parameters():
+                    p.requires_grad = False
+                
+                for p in net_G.parameters():
+                    p.requires_grad = True
+                optim_G.zero_grad()
 
-            ### Relativistic average LSGAN ###
-            loss_gan_G = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake_G)) + torch.ones_like(net_D(D_in_real))) ** 2) \
-                          + torch.mean((net_D(D_in_fake_G) - torch.mean(net_D(D_in_real)) - torch.ones_like(net_D(D_in_real))) ** 2))/2 * 0.1
+                D_in_fake_G = predict_sample.cuda() + noise
+
+                ### Relativistic average LSGAN ###
+                loss_gan_G = (torch.mean((net_D(D_in_real) - torch.mean(net_D(D_in_fake_G)) + torch.ones_like(net_D(D_in_real))) ** 2) \
+                            + torch.mean((net_D(D_in_fake_G) - torch.mean(net_D(D_in_real)) - torch.ones_like(net_D(D_in_real))) ** 2))/2 * 0.1
 
 
-            loss_all = loss_all + loss_gan_G
+                loss_all = loss_all + loss_gan_G
 
             loss_all.backward()
             optim_G.step()
@@ -315,11 +310,11 @@ def main():
                 board.add_scalar('loss_l1', loss_l1.item(), step+1)
                 board.add_scalar('loss_vgg', loss_vgg.item(), step+1)
                 board.add_scalar('loss_dice', loss_dice.item(), step+1)
-                # board.add_scalar('loss_bce', loss_bce.item(), step+1)
                 board.add_scalar('loss_edge', loss_edge.item(), step+1)
 
-                board.add_scalar('loss_gan_D', loss_gan_D.item(), step+1)
-                board.add_scalar('loss_gan_G', loss_gan_G.item(), step+1)
+                if config.wavelet_model.use_gan:
+                    board.add_scalar('loss_gan_D', loss_gan_D.item(), step+1)
+                    board.add_scalar('loss_gan_G', loss_gan_G.item(), step+1)
                 
                 
                 input_image_01 = ((input_image + 1) * 0.5).clamp(0,1)
@@ -335,13 +330,18 @@ def main():
         if args.save_content:
             if (epoch + 1) % args.save_content_every == 0:
                 print('Saving content.')
-                content = {'epoch': epoch + 1, 'step': step, 'args': args,
-                            'netG_dict': net_G.state_dict(), 'optimizerG': optim_G.state_dict(),
-                            'schedulerG': schedu_G.state_dict(), 
-                            'netD_dict': net_D.state_dict(),
-                            'optimizerD': optim_D.state_dict(), 'schedulerD': schedu_D.state_dict(), 
-                        }
-
+                if config.wavelet_model.use_gan:
+                    content = {'epoch': epoch + 1, 'step': step, 'args': args,
+                                'netG_dict': net_G.state_dict(), 'optimizerG': optim_G.state_dict(),
+                                'schedulerG': schedu_G.state_dict(), 
+                                'netD_dict': net_D.state_dict(),
+                                'optimizerD': optim_D.state_dict(), 'schedulerD': schedu_D.state_dict(), 
+                            }
+                else:
+                    content = {'epoch': epoch + 1, 'step': step, 'args': args,
+                                'netG_dict': net_G.state_dict(), 'optimizerG': optim_G.state_dict(),
+                                'schedulerG': schedu_G.state_dict(),  
+                            }
                 torch.save(content, os.path.join(exp_path, 'content.pth'))
         
         if (epoch+1) % args.save_count == 0:

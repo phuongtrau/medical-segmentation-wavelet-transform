@@ -42,7 +42,7 @@ wavelet_model:
     ema: True
     ema_decay: 0.9999
     cross_attn: True
-
+    use_gan: True
 clip:
     image_resolution: 224
     # clip_model: "ViT-L/14" # RN50 / RN101 / RN50x4 / RN50x16 / RN50x64 / ViT-B/32 / ViT-B/16 / ViT-L/14 / ViT-L/14@336px
