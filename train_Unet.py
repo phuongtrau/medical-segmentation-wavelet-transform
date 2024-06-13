@@ -150,7 +150,7 @@ def main():
     
     ### logging experiment ###
     ### experiment name ###
-    parent_dir = "/mnt/hdd_1A/ds_project/result" 
+    parent_dir = "./result" 
     exp_path = os.path.join(parent_dir, config.model.name)
     
     # if rank == 0:
