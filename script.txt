@@ -1,1 +1,0 @@
-CUDA_VISIBLE_DEVICE=1 python train.py --num_epoch 100 --save_content --batch_size 1
