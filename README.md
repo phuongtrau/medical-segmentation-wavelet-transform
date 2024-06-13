@@ -1,5 +1,5 @@
 # Medical-Segmentation-Wavelet-Transform
-A repo of a project in DS 503 course - Spring 2024 in KAIST.
+A repo of a project in DS503 - Spring 2024 in KAIST.
 ## Installation
 ```
 conda env create -f environment.yml
